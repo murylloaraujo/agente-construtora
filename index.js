@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
@@ -8,12 +9,89 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL;
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE;
+const DATABASE_URL = process.env.DATABASE_URL;
 const PORT = process.env.PORT || 3000;
 
 const GRUPO_NF = "120363428406889529@g.us";
 
-let notas = [];
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
 let sessoes = {};
+
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notas (
+      id BIGINT PRIMARY KEY,
+      fornecedor TEXT,
+      numero_nf TEXT,
+      data_faturamento TEXT,
+      vencimento TEXT,
+      valor NUMERIC,
+      valor_pago NUMERIC DEFAULT 0,
+      obra TEXT,
+      forma_pagamento TEXT,
+      chave_pix TEXT,
+      pago TEXT DEFAULT 'false',
+      data_pagamento TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  console.log("Banco de dados inicializado ✅");
+}
+
+async function salvarNota(n) {
+  await pool.query(`
+    INSERT INTO notas (id, fornecedor, numero_nf, data_faturamento, vencimento, valor, valor_pago, obra, forma_pagamento, chave_pix, pago, data_pagamento)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    ON CONFLICT (id) DO UPDATE SET
+      fornecedor=EXCLUDED.fornecedor, numero_nf=EXCLUDED.numero_nf,
+      data_faturamento=EXCLUDED.data_faturamento, vencimento=EXCLUDED.vencimento,
+      valor=EXCLUDED.valor, valor_pago=EXCLUDED.valor_pago, obra=EXCLUDED.obra,
+      forma_pagamento=EXCLUDED.forma_pagamento, chave_pix=EXCLUDED.chave_pix,
+      pago=EXCLUDED.pago, data_pagamento=EXCLUDED.data_pagamento
+  `, [n.id, n.fornecedor, n.numeroNF, n.dataFaturamento, n.vencimento, n.valor, n.valorPago||0, n.obra, n.formaPagamento, n.chavePix, String(n.pago), n.dataPagamento]);
+}
+
+async function buscarNotas() {
+  const res = await pool.query("SELECT * FROM notas ORDER BY criado_em ASC");
+  return res.rows.map(r => ({
+    id: Number(r.id),
+    fornecedor: r.fornecedor,
+    numeroNF: r.numero_nf,
+    dataFaturamento: r.data_faturamento,
+    vencimento: r.vencimento,
+    valor: Number(r.valor),
+    valorPago: Number(r.valor_pago),
+    obra: r.obra,
+    formaPagamento: r.forma_pagamento,
+    chavePix: r.chave_pix,
+    pago: r.pago === "true" ? true : r.pago === "false" ? false : r.pago,
+    dataPagamento: r.data_pagamento,
+  }));
+}
+
+async function buscarNota(id) {
+  const res = await pool.query("SELECT * FROM notas WHERE id=$1", [id]);
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
+  return {
+    id: Number(r.id),
+    fornecedor: r.fornecedor,
+    numeroNF: r.numero_nf,
+    dataFaturamento: r.data_faturamento,
+    vencimento: r.vencimento,
+    valor: Number(r.valor),
+    valorPago: Number(r.valor_pago),
+    obra: r.obra,
+    formaPagamento: r.forma_pagamento,
+    chavePix: r.chave_pix,
+    pago: r.pago === "true" ? true : r.pago === "false" ? false : r.pago,
+    dataPagamento: r.data_pagamento,
+  };
+}
 
 async function enviarMensagem(numero, mensagem) {
   try {
@@ -76,13 +154,11 @@ function gerarResumoNF(n) {
   const valorTotal = Number(n.valor || 0);
   const valorPago = Number(n.valorPago || 0);
   const saldo = valorTotal - valorPago;
-
   let statusStr = "";
   if (n.pago === "total") statusStr = `✅ Pago totalmente em ${n.dataPagamento}`;
   else if (n.pago === "parcial") statusStr = `⚡ Parcial — Pago: R$ ${valorPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)} | Vence: ${n.vencimento}`;
   else statusStr = "⏳ Pendente";
-
-  let resumo = `✅ *NF atualizada!*\n\n`;
+  let resumo = `✅ *NF salva no banco de dados!*\n\n`;
   resumo += `🏢 *Fornecedor:* ${n.fornecedor}\n`;
   resumo += `🔢 *NF Nº:* ${n.numeroNF || "N/A"}\n`;
   resumo += `📅 *Faturamento:* ${n.dataFaturamento || "N/A"}\n`;
@@ -116,26 +192,26 @@ async function iniciarPerguntas(grupo, nota) {
     await enviarMensagem(grupo, `🔑 *Qual a chave PIX do fornecedor ${nota.fornecedor}?*\n\nEx: CPF, CNPJ, e-mail ou chave aleatória`);
     return;
   }
-  if (!nota.pago) {
+  if (!nota.pago || nota.pago === false || nota.pago === "false") {
     sessoes[grupo] = { etapa: "status", notaId: nota.id };
     await enviarMensagem(grupo, `💰 *Esta NF de R$ ${Number(nota.valor).toFixed(2)} já foi paga?*\n\n1️⃣ Sim, totalmente\n2️⃣ Parcialmente\n3️⃣ Não, está pendente`);
     return;
   }
+  await salvarNota(nota);
   await enviarMensagem(grupo, gerarResumoNF(nota));
 }
 
 async function processarResposta(grupo, texto) {
   const sessao = sessoes[grupo];
   if (!sessao) return false;
-
-  const nota = notas.find((n) => n.id === sessao.notaId);
+  const nota = await buscarNota(sessao.notaId);
   if (!nota) { delete sessoes[grupo]; return false; }
-
   const t = texto.trim();
 
   if (sessao.etapa === "obra") {
     nota.obra = t;
     delete sessoes[grupo];
+    await salvarNota(nota);
     await enviarMensagem(grupo, `✅ Obra/CC: *${t}*`);
     await iniciarPerguntas(grupo, nota);
     return true;
@@ -145,6 +221,7 @@ async function processarResposta(grupo, texto) {
     const dataRegex = /\d{2}\/\d{2}\/\d{4}/;
     if (dataRegex.test(t)) {
       nota.vencimento = t;
+      await salvarNota(nota);
       delete sessoes[grupo];
       if (sessao.etapa === "novoVencimento") {
         await enviarMensagem(grupo, gerarResumoNF(nota));
@@ -163,9 +240,9 @@ async function processarResposta(grupo, texto) {
     if (t === "1" || t.toLowerCase().includes("pix")) forma = "PIX";
     else if (t === "2" || t.toLowerCase().includes("boleto")) forma = "Boleto";
     else if (t === "3" || t.toLowerCase().includes("dep")) forma = "Depósito";
-
     if (forma) {
       nota.formaPagamento = forma;
+      await salvarNota(nota);
       delete sessoes[grupo];
       await enviarMensagem(grupo, `✅ Forma de pagamento: *${forma}*`);
       await iniciarPerguntas(grupo, nota);
@@ -177,6 +254,7 @@ async function processarResposta(grupo, texto) {
 
   if (sessao.etapa === "chavePix") {
     nota.chavePix = t;
+    await salvarNota(nota);
     delete sessoes[grupo];
     await enviarMensagem(grupo, `✅ Chave PIX salva: *${t}*`);
     await iniciarPerguntas(grupo, nota);
@@ -188,6 +266,7 @@ async function processarResposta(grupo, texto) {
       nota.pago = "total";
       nota.valorPago = nota.valor;
       nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+      await salvarNota(nota);
       delete sessoes[grupo];
       await enviarMensagem(grupo, gerarResumoNF(nota));
     } else if (t === "2" || t.toLowerCase().includes("parcial")) {
@@ -196,6 +275,7 @@ async function processarResposta(grupo, texto) {
     } else {
       nota.pago = false;
       nota.valorPago = 0;
+      await salvarNota(nota);
       delete sessoes[grupo];
       await enviarMensagem(grupo, gerarResumoNF(nota));
     }
@@ -208,9 +288,9 @@ async function processarResposta(grupo, texto) {
       nota.pago = "parcial";
       nota.valorPago = (Number(nota.valorPago || 0) + valor);
       nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+      await salvarNota(nota);
       const saldo = Number(nota.valor) - Number(nota.valorPago);
       await enviarMensagem(grupo, `✅ Pago: R$ ${valor.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`);
-      // Perguntar novo vencimento para o saldo
       sessoes[grupo] = { etapa: "novoVencimento", notaId: nota.id };
       await enviarMensagem(grupo, `📅 *Qual a nova data de vencimento para o saldo de R$ ${saldo.toFixed(2)}?*\n\nEx: 30/04/2026`);
     } else {
@@ -228,12 +308,14 @@ async function processarResposta(grupo, texto) {
         nota.pago = "total";
         nota.valorPago = valorTotal;
         nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+        await salvarNota(nota);
         delete sessoes[grupo];
         await enviarMensagem(grupo, `✅ *${nota.fornecedor}* — Pagamento total confirmado!\n💰 R$ ${valorTotal.toFixed(2)}`);
       } else {
         nota.pago = "parcial";
         nota.valorPago = novoPago;
         nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+        await salvarNota(nota);
         const saldo = valorTotal - novoPago;
         await enviarMensagem(grupo, `⚡ Pago: R$ ${novoPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`);
         sessoes[grupo] = { etapa: "novoVencimento", notaId: nota.id };
@@ -250,20 +332,15 @@ async function processarResposta(grupo, texto) {
 
 async function processarMidia(grupo, key, message, tipo) {
   await enviarMensagem(grupo, tipo === "pdf" ? "📄 PDF recebido! Analisando NF..." : "📸 Imagem recebida! Analisando NF...");
-
   const base64 = await downloadMidia(key, message);
   if (!base64) { await enviarMensagem(grupo, "❌ Não consegui baixar o arquivo. Tente novamente."); return; }
-
-  const dados = tipo === "pdf"
-    ? await extrairDadosNF("", null, base64)
-    : await extrairDadosNF("", base64, null);
-
+  const dados = tipo === "pdf" ? await extrairDadosNF("", null, base64) : await extrairDadosNF("", base64, null);
   if (dados && dados.fornecedor) {
     dados.id = Date.now();
     dados.pago = false;
     dados.valorPago = 0;
     dados.obra = null;
-    notas.push(dados);
+    await salvarNota(dados);
     await enviarMensagem(grupo, `📋 *NF identificada:*\n\n🏢 ${dados.fornecedor}\n💰 R$ ${Number(dados.valor || 0).toFixed(2)}\n📅 ${dados.dataFaturamento || "N/A"}`);
     await iniciarPerguntas(grupo, dados);
   } else {
@@ -271,7 +348,8 @@ async function processarMidia(grupo, key, message, tipo) {
   }
 }
 
-function gerarRelatorio() {
+async function gerarRelatorio() {
+  const notas = await buscarNotas();
   const hoje = new Date();
   const ativas = notas.filter((n) => n.pago !== "total");
   if (ativas.length === 0) return "✅ Nenhum pagamento pendente.";
@@ -318,27 +396,17 @@ app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
     if (!body.data || !body.data.message) return;
-
     const msg = body.data.message;
     const key = body.data.key;
     const remoteJid = key?.remoteJid || "";
-
     if (remoteJid !== GRUPO_NF) return;
     if (key?.fromMe) return;
 
     const texto = msg.conversation || msg.extendedTextMessage?.text || "";
     const textoLower = texto.toLowerCase().trim();
-    console.log("Grupo NF - Texto:", texto);
 
-    if (msg.documentMessage?.mimetype?.includes("pdf")) {
-      await processarMidia(GRUPO_NF, key, msg, "pdf");
-      return;
-    }
-
-    if (msg.imageMessage) {
-      await processarMidia(GRUPO_NF, key, msg, "imagem");
-      return;
-    }
+    if (msg.documentMessage?.mimetype?.includes("pdf")) { await processarMidia(GRUPO_NF, key, msg, "pdf"); return; }
+    if (msg.imageMessage) { await processarMidia(GRUPO_NF, key, msg, "imagem"); return; }
 
     if (sessoes[GRUPO_NF]) {
       const processado = await processarResposta(GRUPO_NF, texto);
@@ -351,11 +419,12 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (textoLower === "relatorio" || textoLower === "relatório") {
-      await enviarMensagem(GRUPO_NF, gerarRelatorio());
+      await enviarMensagem(GRUPO_NF, await gerarRelatorio());
       return;
     }
 
     if (textoLower === "listar") {
+      const notas = await buscarNotas();
       if (notas.length === 0) { await enviarMensagem(GRUPO_NF, "📋 Nenhuma nota lançada ainda."); return; }
       let lista = `📋 *NOTAS FISCAIS (${notas.length})*\n\n`;
       notas.slice(-10).forEach((n, i) => {
@@ -371,6 +440,7 @@ app.post("/webhook", async (req, res) => {
 
     if (textoLower.startsWith("pago ")) {
       const nome = texto.substring(5).toLowerCase();
+      const notas = await buscarNotas();
       const nota = notas.find((n) => n.fornecedor?.toLowerCase().includes(nome) && n.pago !== "total");
       if (nota) {
         sessoes[GRUPO_NF] = { etapa: "confirmarPagamento", notaId: nota.id };
@@ -384,13 +454,14 @@ app.post("/webhook", async (req, res) => {
 
     if (textoLower.startsWith("parcial ")) {
       const nome = texto.substring(8).toLowerCase();
+      const notas = await buscarNotas();
       const nota = notas.find((n) => n.fornecedor?.toLowerCase().includes(nome) && n.pago !== "total");
       if (nota) {
         sessoes[GRUPO_NF] = { etapa: "valorParcialAtualizar", notaId: nota.id };
         const saldo = Number(nota.valor) - Number(nota.valorPago || 0);
         await enviarMensagem(GRUPO_NF, `💵 *Quanto foi pago para ${nota.fornecedor}?*\n\nSaldo pendente: R$ ${saldo.toFixed(2)}\n\nDigite o valor pago:`);
       } else {
-        await enviarMensagem(GRUPO_NF, `❌ Fornecedor não encontrado ou já pago totalmente.\nDigite: *parcial [nome do fornecedor]*`);
+        await enviarMensagem(GRUPO_NF, `❌ Fornecedor não encontrado.\nDigite: *parcial [nome do fornecedor]*`);
       }
       return;
     }
@@ -400,6 +471,8 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.json({ status: "Agente Construtora online ✅", notas: notas.length }));
+app.get("/", (req, res) => res.json({ status: "Agente Construtora online ✅" }));
 
-app.listen(PORT, () => console.log(`Agente rodando na porta ${PORT}`));
+initDB().then(() => {
+  app.listen(PORT, () => console.log(`Agente rodando na porta ${PORT}`));
+});
