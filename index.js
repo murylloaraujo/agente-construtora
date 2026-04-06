@@ -14,19 +14,10 @@ let notas = [];
 
 async function enviarMensagem(numero, mensagem) {
   try {
-    const url = `${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`;
     await axios.post(
-      url,
-      {
-        number: numero,
-        text: mensagem,
-      },
-      {
-        headers: {
-          apikey: EVOLUTION_API_KEY,
-          "Content-Type": "application/json",
-        },
-      }
+      `${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`,
+      { number: numero, text: mensagem },
+      { headers: { apikey: EVOLUTION_API_KEY, "Content-Type": "application/json" } }
     );
     console.log("Mensagem enviada para", numero);
   } catch (err) {
@@ -34,7 +25,21 @@ async function enviarMensagem(numero, mensagem) {
   }
 }
 
-async function extrairDadosNF(texto, imagemBase64 = null) {
+async function downloadMidia(key, message) {
+  try {
+    const response = await axios.post(
+      `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE}`,
+      { message: { key, message } },
+      { headers: { apikey: EVOLUTION_API_KEY } }
+    );
+    return response.data?.base64 || null;
+  } catch (err) {
+    console.error("Erro ao baixar mídia:", err.response?.data || err.message);
+    return null;
+  }
+}
+
+async function extrairDadosNF(texto = "", imagemBase64 = null, pdfBase64 = null) {
   try {
     const content = [];
 
@@ -42,6 +47,13 @@ async function extrairDadosNF(texto, imagemBase64 = null) {
       content.push({
         type: "image",
         source: { type: "base64", media_type: "image/jpeg", data: imagemBase64 },
+      });
+    }
+
+    if (pdfBase64) {
+      content.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: pdfBase64 },
       });
     }
 
@@ -74,21 +86,20 @@ Se não encontrar algum campo, use null.`,
       }
     );
 
-    const texto_resposta = response.data.content[0].text;
-    console.log("Resposta IA:", texto_resposta);
-    const json_match = texto_resposta.match(/\{[\s\S]*\}/);
-    if (json_match) return JSON.parse(json_match[0]);
+    const resposta = response.data.content[0].text;
+    console.log("Resposta IA:", resposta);
+    const match = resposta.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
     return null;
   } catch (err) {
-    console.error("Erro ao extrair dados NF:", err.response?.data || err.message);
+    console.error("Erro IA:", err.response?.data || err.message);
     return null;
   }
 }
 
-function gerarRelatorioVencimentos() {
+function gerarRelatorio() {
   const hoje = new Date();
   const pendentes = notas.filter((n) => !n.pago);
-
   if (pendentes.length === 0) return "✅ Nenhum pagamento pendente.";
 
   const vencidos = pendentes.filter((n) => {
@@ -100,21 +111,16 @@ function gerarRelatorioVencimentos() {
   const proximos = pendentes.filter((n) => {
     if (!n.vencimento) return false;
     const [d, m, a] = n.vencimento.split("/");
-    const data = new Date(`${a}-${m}-${d}`);
-    const diff = Math.ceil((data - hoje) / 86400000);
+    const diff = Math.ceil((new Date(`${a}-${m}-${d}`) - hoje) / 86400000);
     return diff >= 0 && diff <= 7;
   });
 
   let rel = `📊 *RELATÓRIO DE VENCIMENTOS*\n\n`;
-
   if (vencidos.length > 0) {
     rel += `🔴 *VENCIDOS (${vencidos.length}):*\n`;
-    vencidos.forEach((n) => {
-      rel += `• ${n.fornecedor} - R$ ${Number(n.valor).toFixed(2)} - Venceu ${n.vencimento}\n`;
-    });
+    vencidos.forEach((n) => rel += `• ${n.fornecedor} - R$ ${Number(n.valor).toFixed(2)} - Venceu ${n.vencimento}\n`);
     rel += "\n";
   }
-
   if (proximos.length > 0) {
     rel += `🟡 *PRÓXIMOS 7 DIAS (${proximos.length}):*\n`;
     proximos.forEach((n) => {
@@ -124,51 +130,86 @@ function gerarRelatorioVencimentos() {
     });
     rel += "\n";
   }
-
-  const totalPendente = pendentes.reduce((s, n) => s + Number(n.valor || 0), 0);
-  rel += `💰 *Total pendente: R$ ${totalPendente.toFixed(2)}*`;
-
+  const total = pendentes.reduce((s, n) => s + Number(n.valor || 0), 0);
+  rel += `💰 *Total pendente: R$ ${total.toFixed(2)}*`;
   return rel;
+}
+
+async function processarMidia(numero, key, message, tipo) {
+  await enviarMensagem(numero, tipo === "pdf" ? "📄 PDF recebido! Analisando NF..." : "📸 Imagem recebida! Analisando NF...");
+
+  const base64 = await downloadMidia(key, message);
+  if (!base64) {
+    await enviarMensagem(numero, "❌ Não consegui baixar o arquivo. Tente novamente.");
+    return;
+  }
+
+  const dados = tipo === "pdf"
+    ? await extrairDadosNF("", null, base64)
+    : await extrairDadosNF("", base64, null);
+
+  if (dados && dados.fornecedor) {
+    dados.id = Date.now();
+    dados.pago = false;
+    notas.push(dados);
+    await enviarMensagem(numero,
+      `✅ *NF lançada com sucesso!*\n\n🏢 *Fornecedor:* ${dados.fornecedor}\n🔢 *NF Nº:* ${dados.numeroNF || "N/A"}\n📅 *Faturamento:* ${dados.dataFaturamento}\n⏰ *Vencimento:* ${dados.vencimento}\n💰 *Valor:* R$ ${Number(dados.valor).toFixed(2)}\n🏗️ *Obra/CC:* ${dados.obra || "Não identificada"}\n💳 *Pagamento:* ${dados.formaPagamento || "Não informado"}`
+    );
+  } else {
+    await enviarMensagem(numero, "❌ Não consegui extrair os dados. Tente enviar o PDF ou uma foto mais nítida.");
+  }
 }
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
-
   try {
     const body = req.body;
-    console.log("Webhook recebido:", JSON.stringify(body).substring(0, 200));
+    console.log("Webhook:", JSON.stringify(body).substring(0, 300));
 
     if (!body.data || !body.data.message) return;
 
     const msg = body.data.message;
-    const remoteJid = body.data.key?.remoteJid || "";
+    const key = body.data.key;
+    const remoteJid = key?.remoteJid || "";
     const numero = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
-    const fromMe = body.data.key?.fromMe;
-
-    if (!numero || fromMe) return;
+    if (!numero || key?.fromMe) return;
 
     const texto = msg.conversation || msg.extendedTextMessage?.text || "";
     const textoLower = texto.toLowerCase().trim();
+    console.log("De:", numero, "Texto:", texto);
 
-    console.log("Mensagem de:", numero, "Texto:", texto);
+    // PDF
+    if (msg.documentMessage) {
+      const mimetype = msg.documentMessage.mimetype || "";
+      if (mimetype.includes("pdf")) {
+        await processarMidia(numero, key, msg, "pdf");
+      } else {
+        await enviarMensagem(numero, "❌ Formato não suportado. Envie PDF ou foto da NF.");
+      }
+      return;
+    }
 
+    // Imagem
+    if (msg.imageMessage) {
+      await processarMidia(numero, key, msg, "imagem");
+      return;
+    }
+
+    // Comandos de texto
     if (textoLower === "ajuda" || textoLower === "menu") {
       await enviarMensagem(numero,
-        `🏗️ *AGENTE CONSTRUTORA*\n\n📋 *Comandos disponíveis:*\n\n• Envie uma *foto* da NF para lançar\n• *relatorio* - ver vencimentos\n• *pago [fornecedor]* - confirmar pagamento\n• *listar* - ver todas as NFs\n• *ajuda* - este menu`
+        `🏗️ *AGENTE CONSTRUTORA*\n\n📋 *Comandos:*\n\n• Envie *PDF* ou *foto* da NF para lançar\n• *relatorio* - ver vencimentos\n• *pago [fornecedor]* - confirmar pagamento\n• *listar* - ver todas as NFs\n• *ajuda* - este menu`
       );
       return;
     }
 
     if (textoLower === "relatorio" || textoLower === "relatório") {
-      await enviarMensagem(numero, gerarRelatorioVencimentos());
+      await enviarMensagem(numero, gerarRelatorio());
       return;
     }
 
     if (textoLower === "listar") {
-      if (notas.length === 0) {
-        await enviarMensagem(numero, "📋 Nenhuma nota fiscal lançada ainda.");
-        return;
-      }
+      if (notas.length === 0) { await enviarMensagem(numero, "📋 Nenhuma nota lançada ainda."); return; }
       let lista = `📋 *NOTAS FISCAIS (${notas.length})*\n\n`;
       notas.slice(-10).forEach((n, i) => {
         lista += `${i + 1}. *${n.fornecedor}*\n   R$ ${Number(n.valor).toFixed(2)} | ${n.vencimento} | ${n.pago ? "✅ Pago" : "⏳ Pendente"}\n\n`;
@@ -178,64 +219,35 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (textoLower.startsWith("pago ")) {
-      const nomeFornecedor = texto.substring(5).toLowerCase();
-      const nota = notas.find((n) => n.fornecedor?.toLowerCase().includes(nomeFornecedor) && !n.pago);
+      const nome = texto.substring(5).toLowerCase();
+      const nota = notas.find((n) => n.fornecedor?.toLowerCase().includes(nome) && !n.pago);
       if (nota) {
         nota.pago = true;
         nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
         await enviarMensagem(numero, `✅ Pagamento de *${nota.fornecedor}* - R$ ${Number(nota.valor).toFixed(2)} confirmado!`);
       } else {
-        await enviarMensagem(numero, `❌ Fornecedor não encontrado.\n\nDigite: *pago [nome do fornecedor]*`);
-      }
-      return;
-    }
-
-    if (msg.imageMessage) {
-      await enviarMensagem(numero, "📸 Imagem recebida! Analisando NF...");
-      try {
-        const mediaResponse = await axios.post(
-          `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE}`,
-          { message: { key: body.data.key, message: msg } },
-          { headers: { apikey: EVOLUTION_API_KEY } }
-        );
-        const base64 = mediaResponse.data.base64;
-        const dados = await extrairDadosNF("", base64);
-        if (dados && dados.fornecedor) {
-          dados.id = Date.now();
-          dados.pago = false;
-          notas.push(dados);
-          await enviarMensagem(numero,
-            `✅ *NF lançada!*\n\n🏢 *Fornecedor:* ${dados.fornecedor}\n📅 *Faturamento:* ${dados.dataFaturamento}\n⏰ *Vencimento:* ${dados.vencimento}\n💰 *Valor:* R$ ${Number(dados.valor).toFixed(2)}\n🏗️ *Obra:* ${dados.obra || "Não identificada"}\n💳 *Pagamento:* ${dados.formaPagamento || "Não informado"}`
-          );
-        } else {
-          await enviarMensagem(numero, "❌ Não consegui extrair os dados. Tente uma foto mais nítida.");
-        }
-      } catch (err) {
-        console.error("Erro imagem:", err.message);
-        await enviarMensagem(numero, "❌ Erro ao processar imagem.");
+        await enviarMensagem(numero, `❌ Fornecedor não encontrado.\nDigite: *pago [nome do fornecedor]*`);
       }
       return;
     }
 
     if (texto.length > 10) {
-      await enviarMensagem(numero, "🔍 Analisando nota fiscal...");
+      await enviarMensagem(numero, "🔍 Analisando dados da NF...");
       const dados = await extrairDadosNF(texto);
       if (dados && dados.fornecedor) {
         dados.id = Date.now();
         dados.pago = false;
         notas.push(dados);
         await enviarMensagem(numero,
-          `✅ *NF lançada!*\n\n🏢 *Fornecedor:* ${dados.fornecedor}\n📅 *Faturamento:* ${dados.dataFaturamento}\n⏰ *Vencimento:* ${dados.vencimento}\n💰 *Valor:* R$ ${Number(dados.valor).toFixed(2)}\n🏗️ *Obra:* ${dados.obra || "Não identificada"}\n💳 *Pagamento:* ${dados.formaPagamento || "Não informado"}`
+          `✅ *NF lançada!*\n\n🏢 *Fornecedor:* ${dados.fornecedor}\n📅 *Faturamento:* ${dados.dataFaturamento}\n⏰ *Vencimento:* ${dados.vencimento}\n💰 *Valor:* R$ ${Number(dados.valor).toFixed(2)}\n🏗️ *Obra/CC:* ${dados.obra || "Não identificada"}\n💳 *Pagamento:* ${dados.formaPagamento || "Não informado"}`
         );
       } else {
-        await enviarMensagem(numero,
-          `❓ Não identifiquei uma NF.\n\nDigite *ajuda* para ver os comandos disponíveis.`
-        );
+        await enviarMensagem(numero, `❓ Não identifiquei uma NF.\nDigite *ajuda* para ver os comandos.`);
       }
     }
 
   } catch (err) {
-    console.error("Erro geral webhook:", err.message);
+    console.error("Erro geral:", err.message);
   }
 });
 
