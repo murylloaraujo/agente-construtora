@@ -79,10 +79,10 @@ function gerarResumoNF(n) {
 
   let statusStr = "";
   if (n.pago === "total") statusStr = `✅ Pago totalmente em ${n.dataPagamento}`;
-  else if (n.pago === "parcial") statusStr = `⚡ Parcial — Pago: R$ ${valorPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`;
+  else if (n.pago === "parcial") statusStr = `⚡ Parcial — Pago: R$ ${valorPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)} | Vence: ${n.vencimento}`;
   else statusStr = "⏳ Pendente";
 
-  let resumo = `✅ *NF lançada com sucesso!*\n\n`;
+  let resumo = `✅ *NF atualizada!*\n\n`;
   resumo += `🏢 *Fornecedor:* ${n.fornecedor}\n`;
   resumo += `🔢 *NF Nº:* ${n.numeroNF || "N/A"}\n`;
   resumo += `📅 *Faturamento:* ${n.dataFaturamento || "N/A"}\n`;
@@ -141,13 +141,17 @@ async function processarResposta(grupo, texto) {
     return true;
   }
 
-  if (sessao.etapa === "vencimento") {
+  if (sessao.etapa === "vencimento" || sessao.etapa === "novoVencimento") {
     const dataRegex = /\d{2}\/\d{2}\/\d{4}/;
     if (dataRegex.test(t)) {
       nota.vencimento = t;
       delete sessoes[grupo];
-      await enviarMensagem(grupo, `✅ Vencimento: *${t}*`);
-      await iniciarPerguntas(grupo, nota);
+      if (sessao.etapa === "novoVencimento") {
+        await enviarMensagem(grupo, gerarResumoNF(nota));
+      } else {
+        await enviarMensagem(grupo, `✅ Vencimento: *${t}*`);
+        await iniciarPerguntas(grupo, nota);
+      }
     } else {
       await enviarMensagem(grupo, `❌ Formato inválido. Use DD/MM/AAAA\nEx: 15/04/2026`);
     }
@@ -188,7 +192,7 @@ async function processarResposta(grupo, texto) {
       await enviarMensagem(grupo, gerarResumoNF(nota));
     } else if (t === "2" || t.toLowerCase().includes("parcial")) {
       sessoes[grupo] = { etapa: "valorParcial", notaId: nota.id };
-      await enviarMensagem(grupo, `💵 *Qual valor já foi pago?*\n\nValor total da NF: R$ ${Number(nota.valor).toFixed(2)}\n\nEx: 5000`);
+      await enviarMensagem(grupo, `💵 *Qual valor já foi pago?*\n\nValor total: R$ ${Number(nota.valor).toFixed(2)}\n\nEx: 5000`);
     } else {
       nota.pago = false;
       nota.valorPago = 0;
@@ -198,44 +202,45 @@ async function processarResposta(grupo, texto) {
     return true;
   }
 
-  if (sessao.etapa === "valorParcial") {
+  if (sessao.etapa === "valorParcial" || sessao.etapa === "valorParcialAtualizar") {
     const valor = parseFloat(t.replace(",", ".").replace(/[^0-9.]/g, ""));
     if (!isNaN(valor) && valor > 0) {
       nota.pago = "parcial";
-      nota.valorPago = valor;
+      nota.valorPago = (Number(nota.valorPago || 0) + valor);
       nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-      delete sessoes[grupo];
-      const saldo = Number(nota.valor) - valor;
-      await enviarMensagem(grupo, `✅ Pagamento parcial registrado!\n💵 Pago: R$ ${valor.toFixed(2)}\n📌 Saldo restante: R$ ${saldo.toFixed(2)}`);
-      await enviarMensagem(grupo, gerarResumoNF(nota));
+      const saldo = Number(nota.valor) - Number(nota.valorPago);
+      await enviarMensagem(grupo, `✅ Pago: R$ ${valor.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`);
+      // Perguntar novo vencimento para o saldo
+      sessoes[grupo] = { etapa: "novoVencimento", notaId: nota.id };
+      await enviarMensagem(grupo, `📅 *Qual a nova data de vencimento para o saldo de R$ ${saldo.toFixed(2)}?*\n\nEx: 30/04/2026`);
     } else {
-      await enviarMensagem(grupo, `❌ Valor inválido. Digite apenas o número.\nEx: 5000 ou 5000.50`);
+      await enviarMensagem(grupo, `❌ Valor inválido. Ex: 5000 ou 5000.50`);
     }
     return true;
   }
 
-  // Confirmar pagamento de nota existente
   if (sessao.etapa === "confirmarPagamento") {
     const valor = parseFloat(t.replace(",", ".").replace(/[^0-9.]/g, ""));
     if (!isNaN(valor) && valor > 0) {
       const valorTotal = Number(nota.valor);
-      if (valor >= valorTotal) {
+      const novoPago = Number(nota.valorPago || 0) + valor;
+      if (novoPago >= valorTotal) {
         nota.pago = "total";
         nota.valorPago = valorTotal;
-      } else {
-        nota.pago = "parcial";
-        nota.valorPago = (Number(nota.valorPago || 0) + valor);
-      }
-      nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-      delete sessoes[grupo];
-      const saldo = valorTotal - Number(nota.valorPago);
-      if (nota.pago === "total") {
+        nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+        delete sessoes[grupo];
         await enviarMensagem(grupo, `✅ *${nota.fornecedor}* — Pagamento total confirmado!\n💰 R$ ${valorTotal.toFixed(2)}`);
       } else {
-        await enviarMensagem(grupo, `⚡ *${nota.fornecedor}* — Pagamento parcial confirmado!\n💵 Pago: R$ ${Number(nota.valorPago).toFixed(2)}\n📌 Saldo: R$ ${saldo.toFixed(2)}`);
+        nota.pago = "parcial";
+        nota.valorPago = novoPago;
+        nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+        const saldo = valorTotal - novoPago;
+        await enviarMensagem(grupo, `⚡ Pago: R$ ${novoPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`);
+        sessoes[grupo] = { etapa: "novoVencimento", notaId: nota.id };
+        await enviarMensagem(grupo, `📅 *Qual a nova data de vencimento para o saldo de R$ ${saldo.toFixed(2)}?*\n\nEx: 30/04/2026`);
       }
     } else {
-      await enviarMensagem(grupo, `❌ Valor inválido. Digite apenas o número.\nEx: 5000 ou 5000.50`);
+      await enviarMensagem(grupo, `❌ Valor inválido. Ex: 5000 ou 5000.50`);
     }
     return true;
   }
@@ -262,7 +267,7 @@ async function processarMidia(grupo, key, message, tipo) {
     await enviarMensagem(grupo, `📋 *NF identificada:*\n\n🏢 ${dados.fornecedor}\n💰 R$ ${Number(dados.valor || 0).toFixed(2)}\n📅 ${dados.dataFaturamento || "N/A"}`);
     await iniciarPerguntas(grupo, dados);
   } else {
-    await enviarMensagem(grupo, "❌ Não consegui extrair os dados. Tente enviar o PDF ou uma foto mais nítida.");
+    await enviarMensagem(grupo, "❌ Não consegui extrair os dados. Tente enviar o PDF ou foto mais nítida.");
   }
 }
 
@@ -341,7 +346,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (textoLower === "ajuda" || textoLower === "menu") {
-      await enviarMensagem(GRUPO_NF, `🏗️ *AGENTE CONSTRUTORA*\n\n📋 *Comandos:*\n\n• Envie *PDF* ou *foto* da NF\n• *relatorio* - ver vencimentos\n• *pago [fornecedor]* - confirmar pagamento\n• *listar* - ver todas as NFs\n• *ajuda* - este menu`);
+      await enviarMensagem(GRUPO_NF, `🏗️ *AGENTE CONSTRUTORA*\n\n📋 *Comandos:*\n\n• Envie *PDF* ou *foto* da NF\n• *relatorio* - ver vencimentos\n• *pago [fornecedor]* - confirmar pagamento total\n• *parcial [fornecedor]* - registrar pagamento parcial\n• *listar* - ver todas as NFs\n• *ajuda* - este menu`);
       return;
     }
 
@@ -370,9 +375,22 @@ app.post("/webhook", async (req, res) => {
       if (nota) {
         sessoes[GRUPO_NF] = { etapa: "confirmarPagamento", notaId: nota.id };
         const saldo = Number(nota.valor) - Number(nota.valorPago || 0);
-        await enviarMensagem(GRUPO_NF, `💵 *Quanto foi pago para ${nota.fornecedor}?*\n\nSaldo pendente: R$ ${saldo.toFixed(2)}\n\nDigite o valor pago:`);
+        await enviarMensagem(GRUPO_NF, `💵 *Quanto foi pago para ${nota.fornecedor}?*\n\nSaldo pendente: R$ ${saldo.toFixed(2)}\n\nDigite o valor:`);
       } else {
         await enviarMensagem(GRUPO_NF, `❌ Fornecedor não encontrado ou já pago.\nDigite: *pago [nome do fornecedor]*`);
+      }
+      return;
+    }
+
+    if (textoLower.startsWith("parcial ")) {
+      const nome = texto.substring(8).toLowerCase();
+      const nota = notas.find((n) => n.fornecedor?.toLowerCase().includes(nome) && n.pago !== "total");
+      if (nota) {
+        sessoes[GRUPO_NF] = { etapa: "valorParcialAtualizar", notaId: nota.id };
+        const saldo = Number(nota.valor) - Number(nota.valorPago || 0);
+        await enviarMensagem(GRUPO_NF, `💵 *Quanto foi pago para ${nota.fornecedor}?*\n\nSaldo pendente: R$ ${saldo.toFixed(2)}\n\nDigite o valor pago:`);
+      } else {
+        await enviarMensagem(GRUPO_NF, `❌ Fornecedor não encontrado ou já pago totalmente.\nDigite: *parcial [nome do fornecedor]*`);
       }
       return;
     }
