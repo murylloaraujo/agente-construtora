@@ -58,16 +58,10 @@ async function salvarNota(n) {
 async function buscarNotas() {
   const res = await pool.query("SELECT * FROM notas ORDER BY criado_em ASC");
   return res.rows.map(r => ({
-    id: Number(r.id),
-    fornecedor: r.fornecedor,
-    numeroNF: r.numero_nf,
-    dataFaturamento: r.data_faturamento,
-    vencimento: r.vencimento,
-    valor: Number(r.valor),
-    valorPago: Number(r.valor_pago),
-    obra: r.obra,
-    formaPagamento: r.forma_pagamento,
-    chavePix: r.chave_pix,
+    id: Number(r.id), fornecedor: r.fornecedor, numeroNF: r.numero_nf,
+    dataFaturamento: r.data_faturamento, vencimento: r.vencimento,
+    valor: Number(r.valor), valorPago: Number(r.valor_pago), obra: r.obra,
+    formaPagamento: r.forma_pagamento, chavePix: r.chave_pix,
     pago: r.pago === "true" ? true : r.pago === "false" ? false : r.pago,
     dataPagamento: r.data_pagamento,
   }));
@@ -78,16 +72,10 @@ async function buscarNota(id) {
   if (res.rows.length === 0) return null;
   const r = res.rows[0];
   return {
-    id: Number(r.id),
-    fornecedor: r.fornecedor,
-    numeroNF: r.numero_nf,
-    dataFaturamento: r.data_faturamento,
-    vencimento: r.vencimento,
-    valor: Number(r.valor),
-    valorPago: Number(r.valor_pago),
-    obra: r.obra,
-    formaPagamento: r.forma_pagamento,
-    chavePix: r.chave_pix,
+    id: Number(r.id), fornecedor: r.fornecedor, numeroNF: r.numero_nf,
+    dataFaturamento: r.data_faturamento, vencimento: r.vencimento,
+    valor: Number(r.valor), valorPago: Number(r.valor_pago), obra: r.obra,
+    formaPagamento: r.forma_pagamento, chavePix: r.chave_pix,
     pago: r.pago === "true" ? true : r.pago === "false" ? false : r.pago,
     dataPagamento: r.data_pagamento,
   };
@@ -133,13 +121,11 @@ Formato:
 {"fornecedor":"nome","dataFaturamento":"DD/MM/AAAA","vencimento":"DD/MM/AAAA","valor":0.00,"formaPagamento":"PIX ou Boleto ou Deposito","numeroNF":"numero"}
 Se não encontrar algum campo, use null.`,
     });
-
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       { model: "claude-sonnet-4-20250514", max_tokens: 1000, messages: [{ role: "user", content }] },
       { headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
-
     const resposta = response.data.content[0].text;
     const match = resposta.match(/\{[\s\S]*\}/);
     if (match) return JSON.parse(match[0]);
@@ -158,7 +144,7 @@ function gerarResumoNF(n) {
   if (n.pago === "total") statusStr = `✅ Pago totalmente em ${n.dataPagamento}`;
   else if (n.pago === "parcial") statusStr = `⚡ Parcial — Pago: R$ ${valorPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)} | Vence: ${n.vencimento}`;
   else statusStr = "⏳ Pendente";
-  let resumo = `✅ *NF salva no banco de dados!*\n\n`;
+  let resumo = `✅ *NF salva!*\n\n`;
   resumo += `🏢 *Fornecedor:* ${n.fornecedor}\n`;
   resumo += `🔢 *NF Nº:* ${n.numeroNF || "N/A"}\n`;
   resumo += `📅 *Faturamento:* ${n.dataFaturamento || "N/A"}\n`;
@@ -210,8 +196,8 @@ async function processarResposta(grupo, texto) {
 
   if (sessao.etapa === "obra") {
     nota.obra = t;
-    delete sessoes[grupo];
     await salvarNota(nota);
+    delete sessoes[grupo];
     await enviarMensagem(grupo, `✅ Obra/CC: *${t}*`);
     await iniciarPerguntas(grupo, nota);
     return true;
@@ -263,12 +249,8 @@ async function processarResposta(grupo, texto) {
 
   if (sessao.etapa === "status") {
     if (t === "1" || t.toLowerCase().includes("total") || t.toLowerCase() === "sim") {
-      nota.pago = "total";
-      nota.valorPago = nota.valor;
-      nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-      await salvarNota(nota);
-      delete sessoes[grupo];
-      await enviarMensagem(grupo, gerarResumoNF(nota));
+      sessoes[grupo] = { etapa: "dataPagamento", notaId: nota.id, tipoPagamento: "total", valorPago: nota.valor };
+      await enviarMensagem(grupo, `📅 *Qual a data do pagamento?*\n\nEx: 02/04/2026`);
     } else if (t === "2" || t.toLowerCase().includes("parcial")) {
       sessoes[grupo] = { etapa: "valorParcial", notaId: nota.id };
       await enviarMensagem(grupo, `💵 *Qual valor já foi pago?*\n\nValor total: R$ ${Number(nota.valor).toFixed(2)}\n\nEx: 5000`);
@@ -282,17 +264,38 @@ async function processarResposta(grupo, texto) {
     return true;
   }
 
+  if (sessao.etapa === "dataPagamento" || sessao.etapa === "dataPagamentoParcial") {
+    const dataRegex = /\d{2}\/\d{2}\/\d{4}/;
+    if (dataRegex.test(t)) {
+      nota.dataPagamento = t;
+      if (sessao.tipoPagamento === "total") {
+        nota.pago = "total";
+        nota.valorPago = nota.valor;
+      } else {
+        nota.pago = "parcial";
+        nota.valorPago = sessao.valorPago;
+      }
+      await salvarNota(nota);
+      delete sessoes[grupo];
+      await enviarMensagem(grupo, `✅ Data de pagamento: *${t}*`);
+      await enviarMensagem(grupo, gerarResumoNF(nota));
+      if (sessao.tipoPagamento === "parcial") {
+        const saldo = Number(nota.valor) - Number(nota.valorPago);
+        sessoes[grupo] = { etapa: "novoVencimento", notaId: nota.id };
+        await enviarMensagem(grupo, `📅 *Qual a nova data de vencimento para o saldo de R$ ${saldo.toFixed(2)}?*\n\nEx: 30/04/2026`);
+      }
+    } else {
+      await enviarMensagem(grupo, `❌ Formato inválido. Use DD/MM/AAAA\nEx: 02/04/2026`);
+    }
+    return true;
+  }
+
   if (sessao.etapa === "valorParcial" || sessao.etapa === "valorParcialAtualizar") {
     const valor = parseFloat(t.replace(",", ".").replace(/[^0-9.]/g, ""));
     if (!isNaN(valor) && valor > 0) {
-      nota.pago = "parcial";
-      nota.valorPago = (Number(nota.valorPago || 0) + valor);
-      nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-      await salvarNota(nota);
-      const saldo = Number(nota.valor) - Number(nota.valorPago);
-      await enviarMensagem(grupo, `✅ Pago: R$ ${valor.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`);
-      sessoes[grupo] = { etapa: "novoVencimento", notaId: nota.id };
-      await enviarMensagem(grupo, `📅 *Qual a nova data de vencimento para o saldo de R$ ${saldo.toFixed(2)}?*\n\nEx: 30/04/2026`);
+      const novoPago = Number(nota.valorPago || 0) + valor;
+      sessoes[grupo] = { etapa: "dataPagamentoParcial", notaId: nota.id, tipoPagamento: "parcial", valorPago: novoPago };
+      await enviarMensagem(grupo, `📅 *Qual a data deste pagamento?*\n\nEx: 02/04/2026`);
     } else {
       await enviarMensagem(grupo, `❌ Valor inválido. Ex: 5000 ou 5000.50`);
     }
@@ -304,23 +307,9 @@ async function processarResposta(grupo, texto) {
     if (!isNaN(valor) && valor > 0) {
       const valorTotal = Number(nota.valor);
       const novoPago = Number(nota.valorPago || 0) + valor;
-      if (novoPago >= valorTotal) {
-        nota.pago = "total";
-        nota.valorPago = valorTotal;
-        nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-        await salvarNota(nota);
-        delete sessoes[grupo];
-        await enviarMensagem(grupo, `✅ *${nota.fornecedor}* — Pagamento total confirmado!\n💰 R$ ${valorTotal.toFixed(2)}`);
-      } else {
-        nota.pago = "parcial";
-        nota.valorPago = novoPago;
-        nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-        await salvarNota(nota);
-        const saldo = valorTotal - novoPago;
-        await enviarMensagem(grupo, `⚡ Pago: R$ ${novoPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`);
-        sessoes[grupo] = { etapa: "novoVencimento", notaId: nota.id };
-        await enviarMensagem(grupo, `📅 *Qual a nova data de vencimento para o saldo de R$ ${saldo.toFixed(2)}?*\n\nEx: 30/04/2026`);
-      }
+      const tipo = novoPago >= valorTotal ? "total" : "parcial";
+      sessoes[grupo] = { etapa: "dataPagamentoParcial", notaId: nota.id, tipoPagamento: tipo, valorPago: Math.min(novoPago, valorTotal) };
+      await enviarMensagem(grupo, `📅 *Qual a data deste pagamento?*\n\nEx: 02/04/2026`);
     } else {
       await enviarMensagem(grupo, `❌ Valor inválido. Ex: 5000 ou 5000.50`);
     }
