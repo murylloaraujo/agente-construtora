@@ -22,7 +22,6 @@ async function enviarMensagem(numero, mensagem) {
       { number: numero, text: mensagem },
       { headers: { apikey: EVOLUTION_API_KEY, "Content-Type": "application/json" } }
     );
-    console.log("Mensagem enviada para", numero);
   } catch (err) {
     console.error("Erro ao enviar mensagem:", err.response?.data || err.message);
   }
@@ -50,7 +49,7 @@ async function extrairDadosNF(texto = "", imagemBase64 = null, pdfBase64 = null)
     content.push({
       type: "text",
       text: `Você é um assistente especializado em notas fiscais brasileiras.
-Extraia os dados da nota fiscal e retorne APENAS um JSON válido, sem explicações, sem markdown.
+Extraia os dados e retorne APENAS um JSON válido, sem explicações, sem markdown.
 ${texto ? "Texto: " + texto : ""}
 Formato:
 {"fornecedor":"nome","dataFaturamento":"DD/MM/AAAA","vencimento":"DD/MM/AAAA","valor":0.00,"formaPagamento":"PIX ou Boleto ou Deposito","numeroNF":"numero"}
@@ -74,16 +73,25 @@ Se não encontrar algum campo, use null.`,
 }
 
 function gerarResumoNF(n) {
+  const valorTotal = Number(n.valor || 0);
+  const valorPago = Number(n.valorPago || 0);
+  const saldo = valorTotal - valorPago;
+
+  let statusStr = "";
+  if (n.pago === "total") statusStr = `✅ Pago totalmente em ${n.dataPagamento}`;
+  else if (n.pago === "parcial") statusStr = `⚡ Parcial — Pago: R$ ${valorPago.toFixed(2)} | Saldo: R$ ${saldo.toFixed(2)}`;
+  else statusStr = "⏳ Pendente";
+
   let resumo = `✅ *NF lançada com sucesso!*\n\n`;
   resumo += `🏢 *Fornecedor:* ${n.fornecedor}\n`;
   resumo += `🔢 *NF Nº:* ${n.numeroNF || "N/A"}\n`;
   resumo += `📅 *Faturamento:* ${n.dataFaturamento || "N/A"}\n`;
   resumo += `⏰ *Vencimento:* ${n.vencimento || "N/A"}\n`;
-  resumo += `💰 *Valor:* R$ ${Number(n.valor || 0).toFixed(2)}\n`;
+  resumo += `💰 *Valor Total:* R$ ${valorTotal.toFixed(2)}\n`;
   resumo += `🏗️ *Obra/CC:* ${n.obra || "N/A"}\n`;
   resumo += `💳 *Pagamento:* ${n.formaPagamento || "N/A"}\n`;
   if (n.formaPagamento === "PIX" && n.chavePix) resumo += `🔑 *Chave PIX:* ${n.chavePix}\n`;
-  resumo += `📌 *Status:* ${n.pago ? "✅ Pago em " + n.dataPagamento : "⏳ Pendente"}`;
+  resumo += `📌 *Status:* ${statusStr}`;
   return resumo;
 }
 
@@ -108,8 +116,12 @@ async function iniciarPerguntas(grupo, nota) {
     await enviarMensagem(grupo, `🔑 *Qual a chave PIX do fornecedor ${nota.fornecedor}?*\n\nEx: CPF, CNPJ, e-mail ou chave aleatória`);
     return;
   }
-  sessoes[grupo] = { etapa: "status", notaId: nota.id };
-  await enviarMensagem(grupo, `💰 *Esta NF já foi paga?*\n\n1️⃣ Sim, já paguei\n2️⃣ Não, está pendente`);
+  if (!nota.pago) {
+    sessoes[grupo] = { etapa: "status", notaId: nota.id };
+    await enviarMensagem(grupo, `💰 *Esta NF de R$ ${Number(nota.valor).toFixed(2)} já foi paga?*\n\n1️⃣ Sim, totalmente\n2️⃣ Parcialmente\n3️⃣ Não, está pendente`);
+    return;
+  }
+  await enviarMensagem(grupo, gerarResumoNF(nota));
 }
 
 async function processarResposta(grupo, texto) {
@@ -168,15 +180,62 @@ async function processarResposta(grupo, texto) {
   }
 
   if (sessao.etapa === "status") {
-    if (t === "1" || t.toLowerCase().includes("sim") || t.toLowerCase().includes("pag")) {
-      nota.pago = true;
+    if (t === "1" || t.toLowerCase().includes("total") || t.toLowerCase() === "sim") {
+      nota.pago = "total";
+      nota.valorPago = nota.valor;
       nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
       delete sessoes[grupo];
       await enviarMensagem(grupo, gerarResumoNF(nota));
+    } else if (t === "2" || t.toLowerCase().includes("parcial")) {
+      sessoes[grupo] = { etapa: "valorParcial", notaId: nota.id };
+      await enviarMensagem(grupo, `💵 *Qual valor já foi pago?*\n\nValor total da NF: R$ ${Number(nota.valor).toFixed(2)}\n\nEx: 5000`);
     } else {
       nota.pago = false;
+      nota.valorPago = 0;
       delete sessoes[grupo];
       await enviarMensagem(grupo, gerarResumoNF(nota));
+    }
+    return true;
+  }
+
+  if (sessao.etapa === "valorParcial") {
+    const valor = parseFloat(t.replace(",", ".").replace(/[^0-9.]/g, ""));
+    if (!isNaN(valor) && valor > 0) {
+      nota.pago = "parcial";
+      nota.valorPago = valor;
+      nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+      delete sessoes[grupo];
+      const saldo = Number(nota.valor) - valor;
+      await enviarMensagem(grupo, `✅ Pagamento parcial registrado!\n💵 Pago: R$ ${valor.toFixed(2)}\n📌 Saldo restante: R$ ${saldo.toFixed(2)}`);
+      await enviarMensagem(grupo, gerarResumoNF(nota));
+    } else {
+      await enviarMensagem(grupo, `❌ Valor inválido. Digite apenas o número.\nEx: 5000 ou 5000.50`);
+    }
+    return true;
+  }
+
+  // Confirmar pagamento de nota existente
+  if (sessao.etapa === "confirmarPagamento") {
+    const valor = parseFloat(t.replace(",", ".").replace(/[^0-9.]/g, ""));
+    if (!isNaN(valor) && valor > 0) {
+      const valorTotal = Number(nota.valor);
+      if (valor >= valorTotal) {
+        nota.pago = "total";
+        nota.valorPago = valorTotal;
+      } else {
+        nota.pago = "parcial";
+        nota.valorPago = (Number(nota.valorPago || 0) + valor);
+      }
+      nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
+      delete sessoes[grupo];
+      const saldo = valorTotal - Number(nota.valorPago);
+      if (nota.pago === "total") {
+        await enviarMensagem(grupo, `✅ *${nota.fornecedor}* — Pagamento total confirmado!\n💰 R$ ${valorTotal.toFixed(2)}`);
+      } else {
+        await enviarMensagem(grupo, `⚡ *${nota.fornecedor}* — Pagamento parcial confirmado!\n💵 Pago: R$ ${Number(nota.valorPago).toFixed(2)}\n📌 Saldo: R$ ${saldo.toFixed(2)}`);
+      }
+    } else {
+      await enviarMensagem(grupo, `❌ Valor inválido. Digite apenas o número.\nEx: 5000 ou 5000.50`);
     }
     return true;
   }
@@ -197,6 +256,7 @@ async function processarMidia(grupo, key, message, tipo) {
   if (dados && dados.fornecedor) {
     dados.id = Date.now();
     dados.pago = false;
+    dados.valorPago = 0;
     dados.obra = null;
     notas.push(dados);
     await enviarMensagem(grupo, `📋 *NF identificada:*\n\n🏢 ${dados.fornecedor}\n💰 R$ ${Number(dados.valor || 0).toFixed(2)}\n📅 ${dados.dataFaturamento || "N/A"}`);
@@ -208,16 +268,16 @@ async function processarMidia(grupo, key, message, tipo) {
 
 function gerarRelatorio() {
   const hoje = new Date();
-  const pendentes = notas.filter((n) => !n.pago);
-  if (pendentes.length === 0) return "✅ Nenhum pagamento pendente.";
+  const ativas = notas.filter((n) => n.pago !== "total");
+  if (ativas.length === 0) return "✅ Nenhum pagamento pendente.";
 
-  const vencidos = pendentes.filter((n) => {
+  const vencidos = ativas.filter((n) => {
     if (!n.vencimento) return false;
     const [d, m, a] = n.vencimento.split("/");
     return new Date(`${a}-${m}-${d}`) < hoje;
   });
 
-  const proximos = pendentes.filter((n) => {
+  const proximos = ativas.filter((n) => {
     if (!n.vencimento) return false;
     const [d, m, a] = n.vencimento.split("/");
     const diff = Math.ceil((new Date(`${a}-${m}-${d}`) - hoje) / 86400000);
@@ -227,7 +287,10 @@ function gerarRelatorio() {
   let rel = `📊 *RELATÓRIO DE VENCIMENTOS*\n\n`;
   if (vencidos.length > 0) {
     rel += `🔴 *VENCIDOS (${vencidos.length}):*\n`;
-    vencidos.forEach((n) => rel += `• ${n.fornecedor} - R$ ${Number(n.valor).toFixed(2)} - Venceu ${n.vencimento}\n`);
+    vencidos.forEach((n) => {
+      const saldo = Number(n.valor) - Number(n.valorPago || 0);
+      rel += `• ${n.fornecedor} - R$ ${saldo.toFixed(2)} - Venceu ${n.vencimento}\n`;
+    });
     rel += "\n";
   }
   if (proximos.length > 0) {
@@ -235,12 +298,13 @@ function gerarRelatorio() {
     proximos.forEach((n) => {
       const [d, m, a] = n.vencimento.split("/");
       const diff = Math.ceil((new Date(`${a}-${m}-${d}`) - hoje) / 86400000);
-      rel += `• ${n.fornecedor} - R$ ${Number(n.valor).toFixed(2)} - Vence em ${diff}d (${n.vencimento})\n`;
+      const saldo = Number(n.valor) - Number(n.valorPago || 0);
+      rel += `• ${n.fornecedor} - R$ ${saldo.toFixed(2)} - Vence em ${diff}d (${n.vencimento})\n`;
     });
     rel += "\n";
   }
-  const total = pendentes.reduce((s, n) => s + Number(n.valor || 0), 0);
-  rel += `💰 *Total pendente: R$ ${total.toFixed(2)}*`;
+  const total = ativas.reduce((s, n) => s + (Number(n.valor) - Number(n.valorPago || 0)), 0);
+  rel += `💰 *Total a pagar: R$ ${total.toFixed(2)}*`;
   return rel;
 }
 
@@ -254,11 +318,7 @@ app.post("/webhook", async (req, res) => {
     const key = body.data.key;
     const remoteJid = key?.remoteJid || "";
 
-    if (remoteJid !== GRUPO_NF) {
-      console.log("Ignorando mensagem fora do grupo:", remoteJid);
-      return;
-    }
-
+    if (remoteJid !== GRUPO_NF) return;
     if (key?.fromMe) return;
 
     const texto = msg.conversation || msg.extendedTextMessage?.text || "";
@@ -294,7 +354,11 @@ app.post("/webhook", async (req, res) => {
       if (notas.length === 0) { await enviarMensagem(GRUPO_NF, "📋 Nenhuma nota lançada ainda."); return; }
       let lista = `📋 *NOTAS FISCAIS (${notas.length})*\n\n`;
       notas.slice(-10).forEach((n, i) => {
-        lista += `${i + 1}. *${n.fornecedor}*\n   R$ ${Number(n.valor).toFixed(2)} | ${n.vencimento || "S/V"} | ${n.pago ? "✅ Pago" : "⏳ Pendente"}\n\n`;
+        const saldo = Number(n.valor) - Number(n.valorPago || 0);
+        let status = "⏳ Pendente";
+        if (n.pago === "total") status = "✅ Pago";
+        else if (n.pago === "parcial") status = `⚡ Parcial (saldo R$ ${saldo.toFixed(2)})`;
+        lista += `${i + 1}. *${n.fornecedor}*\n   R$ ${Number(n.valor).toFixed(2)} | ${n.vencimento || "S/V"} | ${status}\n\n`;
       });
       await enviarMensagem(GRUPO_NF, lista);
       return;
@@ -302,13 +366,13 @@ app.post("/webhook", async (req, res) => {
 
     if (textoLower.startsWith("pago ")) {
       const nome = texto.substring(5).toLowerCase();
-      const nota = notas.find((n) => n.fornecedor?.toLowerCase().includes(nome) && !n.pago);
+      const nota = notas.find((n) => n.fornecedor?.toLowerCase().includes(nome) && n.pago !== "total");
       if (nota) {
-        nota.pago = true;
-        nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-        await enviarMensagem(GRUPO_NF, `✅ Pagamento de *${nota.fornecedor}* - R$ ${Number(nota.valor).toFixed(2)} confirmado!`);
+        sessoes[GRUPO_NF] = { etapa: "confirmarPagamento", notaId: nota.id };
+        const saldo = Number(nota.valor) - Number(nota.valorPago || 0);
+        await enviarMensagem(GRUPO_NF, `💵 *Quanto foi pago para ${nota.fornecedor}?*\n\nSaldo pendente: R$ ${saldo.toFixed(2)}\n\nDigite o valor pago:`);
       } else {
-        await enviarMensagem(GRUPO_NF, `❌ Fornecedor não encontrado.\nDigite: *pago [nome do fornecedor]*`);
+        await enviarMensagem(GRUPO_NF, `❌ Fornecedor não encontrado ou já pago.\nDigite: *pago [nome do fornecedor]*`);
       }
       return;
     }
