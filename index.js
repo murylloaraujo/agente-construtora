@@ -10,7 +10,6 @@ const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE;
 const PORT = process.env.PORT || 3000;
 
-// ID do grupo "Notas Fiscais - Araújo Marinho"
 const GRUPO_NF = "120363428406889529@g.us";
 
 let notas = [];
@@ -75,7 +74,17 @@ Se não encontrar algum campo, use null.`,
 }
 
 function gerarResumoNF(n) {
-  return `✅ *NF lançada com sucesso!*\n\n🏢 *Fornecedor:* ${n.fornecedor}\n🔢 *NF Nº:* ${n.numeroNF || "N/A"}\n📅 *Faturamento:* ${n.dataFaturamento || "N/A"}\n⏰ *Vencimento:* ${n.vencimento || "N/A"}\n💰 *Valor:* R$ ${Number(n.valor || 0).toFixed(2)}\n🏗️ *Obra/CC:* ${n.obra || "N/A"}\n💳 *Pagamento:* ${n.formaPagamento || "N/A"}\n📌 *Status:* ${n.pago ? "✅ Pago em " + n.dataPagamento : "⏳ Pendente"}`;
+  let resumo = `✅ *NF lançada com sucesso!*\n\n`;
+  resumo += `🏢 *Fornecedor:* ${n.fornecedor}\n`;
+  resumo += `🔢 *NF Nº:* ${n.numeroNF || "N/A"}\n`;
+  resumo += `📅 *Faturamento:* ${n.dataFaturamento || "N/A"}\n`;
+  resumo += `⏰ *Vencimento:* ${n.vencimento || "N/A"}\n`;
+  resumo += `💰 *Valor:* R$ ${Number(n.valor || 0).toFixed(2)}\n`;
+  resumo += `🏗️ *Obra/CC:* ${n.obra || "N/A"}\n`;
+  resumo += `💳 *Pagamento:* ${n.formaPagamento || "N/A"}\n`;
+  if (n.formaPagamento === "PIX" && n.chavePix) resumo += `🔑 *Chave PIX:* ${n.chavePix}\n`;
+  resumo += `📌 *Status:* ${n.pago ? "✅ Pago em " + n.dataPagamento : "⏳ Pendente"}`;
+  return resumo;
 }
 
 async function iniciarPerguntas(grupo, nota) {
@@ -92,6 +101,11 @@ async function iniciarPerguntas(grupo, nota) {
   if (!nota.formaPagamento) {
     sessoes[grupo] = { etapa: "formaPagamento", notaId: nota.id };
     await enviarMensagem(grupo, `💳 *Qual a forma de pagamento?*\n\n1️⃣ PIX\n2️⃣ Boleto\n3️⃣ Depósito`);
+    return;
+  }
+  if (nota.formaPagamento === "PIX" && !nota.chavePix) {
+    sessoes[grupo] = { etapa: "chavePix", notaId: nota.id };
+    await enviarMensagem(grupo, `🔑 *Qual a chave PIX do fornecedor ${nota.fornecedor}?*\n\nEx: CPF, CNPJ, e-mail ou chave aleatória`);
     return;
   }
   sessoes[grupo] = { etapa: "status", notaId: nota.id };
@@ -142,6 +156,14 @@ async function processarResposta(grupo, texto) {
     } else {
       await enviarMensagem(grupo, `❌ Digite 1 (PIX), 2 (Boleto) ou 3 (Depósito)`);
     }
+    return true;
+  }
+
+  if (sessao.etapa === "chavePix") {
+    nota.chavePix = t;
+    delete sessoes[grupo];
+    await enviarMensagem(grupo, `✅ Chave PIX salva: *${t}*`);
+    await iniciarPerguntas(grupo, nota);
     return true;
   }
 
@@ -232,7 +254,6 @@ app.post("/webhook", async (req, res) => {
     const key = body.data.key;
     const remoteJid = key?.remoteJid || "";
 
-    // Filtro: só processa mensagens do grupo de NF
     if (remoteJid !== GRUPO_NF) {
       console.log("Ignorando mensagem fora do grupo:", remoteJid);
       return;
