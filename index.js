@@ -10,6 +10,9 @@ const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE;
 const PORT = process.env.PORT || 3000;
 
+// ID do grupo "Notas Fiscais - Araújo Marinho"
+const GRUPO_NF = "120363428406889529@g.us";
+
 let notas = [];
 let sessoes = {};
 
@@ -75,41 +78,40 @@ function gerarResumoNF(n) {
   return `✅ *NF lançada com sucesso!*\n\n🏢 *Fornecedor:* ${n.fornecedor}\n🔢 *NF Nº:* ${n.numeroNF || "N/A"}\n📅 *Faturamento:* ${n.dataFaturamento || "N/A"}\n⏰ *Vencimento:* ${n.vencimento || "N/A"}\n💰 *Valor:* R$ ${Number(n.valor || 0).toFixed(2)}\n🏗️ *Obra/CC:* ${n.obra || "N/A"}\n💳 *Pagamento:* ${n.formaPagamento || "N/A"}\n📌 *Status:* ${n.pago ? "✅ Pago em " + n.dataPagamento : "⏳ Pendente"}`;
 }
 
-async function iniciarPerguntas(numero, nota) {
-  // SEMPRE pergunta obra primeiro
+async function iniciarPerguntas(grupo, nota) {
   if (!nota.obra) {
-    sessoes[numero] = { etapa: "obra", notaId: nota.id };
-    await enviarMensagem(numero, `🏗️ *Qual a Obra / Centro de Custo desta NF?*\n\nEx: Residencial Aurora, Administração, Galpão Norte...`);
+    sessoes[grupo] = { etapa: "obra", notaId: nota.id };
+    await enviarMensagem(grupo, `🏗️ *Qual a Obra / Centro de Custo desta NF?*\n\nEx: Residencial Aurora, Administração, Galpão Norte...`);
     return;
   }
   if (!nota.vencimento) {
-    sessoes[numero] = { etapa: "vencimento", notaId: nota.id };
-    await enviarMensagem(numero, `📅 *Qual o vencimento desta NF?*\n\nEx: 15/04/2026`);
+    sessoes[grupo] = { etapa: "vencimento", notaId: nota.id };
+    await enviarMensagem(grupo, `📅 *Qual o vencimento desta NF?*\n\nEx: 15/04/2026`);
     return;
   }
   if (!nota.formaPagamento) {
-    sessoes[numero] = { etapa: "formaPagamento", notaId: nota.id };
-    await enviarMensagem(numero, `💳 *Qual a forma de pagamento?*\n\n1️⃣ PIX\n2️⃣ Boleto\n3️⃣ Depósito`);
+    sessoes[grupo] = { etapa: "formaPagamento", notaId: nota.id };
+    await enviarMensagem(grupo, `💳 *Qual a forma de pagamento?*\n\n1️⃣ PIX\n2️⃣ Boleto\n3️⃣ Depósito`);
     return;
   }
-  sessoes[numero] = { etapa: "status", notaId: nota.id };
-  await enviarMensagem(numero, `💰 *Esta NF já foi paga?*\n\n1️⃣ Sim, já paguei\n2️⃣ Não, está pendente`);
+  sessoes[grupo] = { etapa: "status", notaId: nota.id };
+  await enviarMensagem(grupo, `💰 *Esta NF já foi paga?*\n\n1️⃣ Sim, já paguei\n2️⃣ Não, está pendente`);
 }
 
-async function processarResposta(numero, texto) {
-  const sessao = sessoes[numero];
+async function processarResposta(grupo, texto) {
+  const sessao = sessoes[grupo];
   if (!sessao) return false;
 
   const nota = notas.find((n) => n.id === sessao.notaId);
-  if (!nota) { delete sessoes[numero]; return false; }
+  if (!nota) { delete sessoes[grupo]; return false; }
 
   const t = texto.trim();
 
   if (sessao.etapa === "obra") {
     nota.obra = t;
-    delete sessoes[numero];
-    await enviarMensagem(numero, `✅ Obra/CC: *${t}*`);
-    await iniciarPerguntas(numero, nota);
+    delete sessoes[grupo];
+    await enviarMensagem(grupo, `✅ Obra/CC: *${t}*`);
+    await iniciarPerguntas(grupo, nota);
     return true;
   }
 
@@ -117,11 +119,11 @@ async function processarResposta(numero, texto) {
     const dataRegex = /\d{2}\/\d{2}\/\d{4}/;
     if (dataRegex.test(t)) {
       nota.vencimento = t;
-      delete sessoes[numero];
-      await enviarMensagem(numero, `✅ Vencimento: *${t}*`);
-      await iniciarPerguntas(numero, nota);
+      delete sessoes[grupo];
+      await enviarMensagem(grupo, `✅ Vencimento: *${t}*`);
+      await iniciarPerguntas(grupo, nota);
     } else {
-      await enviarMensagem(numero, `❌ Formato inválido. Use DD/MM/AAAA\nEx: 15/04/2026`);
+      await enviarMensagem(grupo, `❌ Formato inválido. Use DD/MM/AAAA\nEx: 15/04/2026`);
     }
     return true;
   }
@@ -134,11 +136,11 @@ async function processarResposta(numero, texto) {
 
     if (forma) {
       nota.formaPagamento = forma;
-      delete sessoes[numero];
-      await enviarMensagem(numero, `✅ Forma de pagamento: *${forma}*`);
-      await iniciarPerguntas(numero, nota);
+      delete sessoes[grupo];
+      await enviarMensagem(grupo, `✅ Forma de pagamento: *${forma}*`);
+      await iniciarPerguntas(grupo, nota);
     } else {
-      await enviarMensagem(numero, `❌ Digite 1 (PIX), 2 (Boleto) ou 3 (Depósito)`);
+      await enviarMensagem(grupo, `❌ Digite 1 (PIX), 2 (Boleto) ou 3 (Depósito)`);
     }
     return true;
   }
@@ -147,12 +149,12 @@ async function processarResposta(numero, texto) {
     if (t === "1" || t.toLowerCase().includes("sim") || t.toLowerCase().includes("pag")) {
       nota.pago = true;
       nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-      delete sessoes[numero];
-      await enviarMensagem(numero, gerarResumoNF(nota));
+      delete sessoes[grupo];
+      await enviarMensagem(grupo, gerarResumoNF(nota));
     } else {
       nota.pago = false;
-      delete sessoes[numero];
-      await enviarMensagem(numero, gerarResumoNF(nota));
+      delete sessoes[grupo];
+      await enviarMensagem(grupo, gerarResumoNF(nota));
     }
     return true;
   }
@@ -160,11 +162,11 @@ async function processarResposta(numero, texto) {
   return false;
 }
 
-async function processarMidia(numero, key, message, tipo) {
-  await enviarMensagem(numero, tipo === "pdf" ? "📄 PDF recebido! Analisando NF..." : "📸 Imagem recebida! Analisando NF...");
+async function processarMidia(grupo, key, message, tipo) {
+  await enviarMensagem(grupo, tipo === "pdf" ? "📄 PDF recebido! Analisando NF..." : "📸 Imagem recebida! Analisando NF...");
 
   const base64 = await downloadMidia(key, message);
-  if (!base64) { await enviarMensagem(numero, "❌ Não consegui baixar o arquivo. Tente novamente."); return; }
+  if (!base64) { await enviarMensagem(grupo, "❌ Não consegui baixar o arquivo. Tente novamente."); return; }
 
   const dados = tipo === "pdf"
     ? await extrairDadosNF("", null, base64)
@@ -173,12 +175,12 @@ async function processarMidia(numero, key, message, tipo) {
   if (dados && dados.fornecedor) {
     dados.id = Date.now();
     dados.pago = false;
-    dados.obra = null; // Sempre pede a obra
+    dados.obra = null;
     notas.push(dados);
-    await enviarMensagem(numero, `📋 *NF identificada:*\n\n🏢 ${dados.fornecedor}\n💰 R$ ${Number(dados.valor || 0).toFixed(2)}\n📅 ${dados.dataFaturamento || "N/A"}`);
-    await iniciarPerguntas(numero, dados);
+    await enviarMensagem(grupo, `📋 *NF identificada:*\n\n🏢 ${dados.fornecedor}\n💰 R$ ${Number(dados.valor || 0).toFixed(2)}\n📅 ${dados.dataFaturamento || "N/A"}`);
+    await iniciarPerguntas(grupo, dados);
   } else {
-    await enviarMensagem(numero, "❌ Não consegui extrair os dados. Tente enviar o PDF ou uma foto mais nítida.");
+    await enviarMensagem(grupo, "❌ Não consegui extrair os dados. Tente enviar o PDF ou uma foto mais nítida.");
   }
 }
 
@@ -229,45 +231,51 @@ app.post("/webhook", async (req, res) => {
     const msg = body.data.message;
     const key = body.data.key;
     const remoteJid = key?.remoteJid || "";
-    const numero = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
-    if (!numero || key?.fromMe) return;
+
+    // Filtro: só processa mensagens do grupo de NF
+    if (remoteJid !== GRUPO_NF) {
+      console.log("Ignorando mensagem fora do grupo:", remoteJid);
+      return;
+    }
+
+    if (key?.fromMe) return;
 
     const texto = msg.conversation || msg.extendedTextMessage?.text || "";
     const textoLower = texto.toLowerCase().trim();
-    console.log("De:", numero, "Texto:", texto);
+    console.log("Grupo NF - Texto:", texto);
 
     if (msg.documentMessage?.mimetype?.includes("pdf")) {
-      await processarMidia(numero, key, msg, "pdf");
+      await processarMidia(GRUPO_NF, key, msg, "pdf");
       return;
     }
 
     if (msg.imageMessage) {
-      await processarMidia(numero, key, msg, "imagem");
+      await processarMidia(GRUPO_NF, key, msg, "imagem");
       return;
     }
 
-    if (sessoes[numero]) {
-      const processado = await processarResposta(numero, texto);
+    if (sessoes[GRUPO_NF]) {
+      const processado = await processarResposta(GRUPO_NF, texto);
       if (processado) return;
     }
 
     if (textoLower === "ajuda" || textoLower === "menu") {
-      await enviarMensagem(numero, `🏗️ *AGENTE CONSTRUTORA*\n\n📋 *Comandos:*\n\n• Envie *PDF* ou *foto* da NF\n• *relatorio* - ver vencimentos\n• *pago [fornecedor]* - confirmar pagamento\n• *listar* - ver todas as NFs\n• *ajuda* - este menu`);
+      await enviarMensagem(GRUPO_NF, `🏗️ *AGENTE CONSTRUTORA*\n\n📋 *Comandos:*\n\n• Envie *PDF* ou *foto* da NF\n• *relatorio* - ver vencimentos\n• *pago [fornecedor]* - confirmar pagamento\n• *listar* - ver todas as NFs\n• *ajuda* - este menu`);
       return;
     }
 
     if (textoLower === "relatorio" || textoLower === "relatório") {
-      await enviarMensagem(numero, gerarRelatorio());
+      await enviarMensagem(GRUPO_NF, gerarRelatorio());
       return;
     }
 
     if (textoLower === "listar") {
-      if (notas.length === 0) { await enviarMensagem(numero, "📋 Nenhuma nota lançada ainda."); return; }
+      if (notas.length === 0) { await enviarMensagem(GRUPO_NF, "📋 Nenhuma nota lançada ainda."); return; }
       let lista = `📋 *NOTAS FISCAIS (${notas.length})*\n\n`;
       notas.slice(-10).forEach((n, i) => {
         lista += `${i + 1}. *${n.fornecedor}*\n   R$ ${Number(n.valor).toFixed(2)} | ${n.vencimento || "S/V"} | ${n.pago ? "✅ Pago" : "⏳ Pendente"}\n\n`;
       });
-      await enviarMensagem(numero, lista);
+      await enviarMensagem(GRUPO_NF, lista);
       return;
     }
 
@@ -277,9 +285,9 @@ app.post("/webhook", async (req, res) => {
       if (nota) {
         nota.pago = true;
         nota.dataPagamento = new Date().toLocaleDateString("pt-BR");
-        await enviarMensagem(numero, `✅ Pagamento de *${nota.fornecedor}* - R$ ${Number(nota.valor).toFixed(2)} confirmado!`);
+        await enviarMensagem(GRUPO_NF, `✅ Pagamento de *${nota.fornecedor}* - R$ ${Number(nota.valor).toFixed(2)} confirmado!`);
       } else {
-        await enviarMensagem(numero, `❌ Fornecedor não encontrado.\nDigite: *pago [nome do fornecedor]*`);
+        await enviarMensagem(GRUPO_NF, `❌ Fornecedor não encontrado.\nDigite: *pago [nome do fornecedor]*`);
       }
       return;
     }
